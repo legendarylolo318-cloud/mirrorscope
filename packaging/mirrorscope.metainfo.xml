@@ -14,7 +14,7 @@
   <launchable type="desktop-id">mirrorscope.desktop</launchable>
   <provides><binary>mirrorscope</binary></provides>
   <categories><category>System</category></categories>
-  <url type="homepage">https://github.com/example/mirrorscope</url>
+  <url type="homepage">https://github.com/legendarylolo318-cloud/mirrorscope</url>
   <content_rating type="oars-1.1"/>
   <releases>
     <release version="0.1.0" date="2026-11-12"/>

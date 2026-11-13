@@ -7,7 +7,7 @@ version = "0.1.0"
 edition = "2021"
 license = "MIT"
 rust-version = "1.80"
-repository = "https://github.com/example/mirrorscope"
+repository = "https://github.com/legendarylolo318-cloud/mirrorscope"
 
 [workspace.dependencies]
 anyhow = "1"
@@ -27,8 +27,8 @@ mirrorscope-core = { path = "crates/core" }
 mirrorscope-cli = { path = "crates/cli" }
 
 [profile.release]
-lto = "thin"
-codegen-units = 4
+lto = "fat"
+codegen-units = 1
 strip = true
 opt-level = "s"
 panic = "abort"
