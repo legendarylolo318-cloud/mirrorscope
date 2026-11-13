@@ -137,6 +137,8 @@ export component MainWindow inherits Window {
     callback units-generate();
     callback units-install();
     callback units-remove();
+    callback install-helper();
+    in property <bool> helper-installed: true;
 
     public function apply-theme() {
         if (root.theme-index == 1) {
@@ -280,7 +282,7 @@ export component MainWindow inherits Window {
                         spacing: 8px;
                         Button { text: "Mirrors"; primary: root.tab == 0; clicked => { root.tab = 0; } }
                         Button { text: "Backups"; primary: root.tab == 1; clicked => { root.tab = 1; root.backups-refresh(); } }
-                        Button { text: "Timer"; primary: root.tab == 2; clicked => { root.tab = 2; } }
+                        Button { text: root.helper-installed ? "Timer" : "Timer / Setup ⚠"; primary: root.tab == 2; clicked => { root.tab = 2; } }
                         Rectangle { horizontal-stretch: 1; }
                         Button { text: root.busy-fetch ? "Fetching…" : "Fetch mirrors"; enabled: !root.busy-fetch; clicked => { root.fetch(); } }
                         Button { text: "Speed test"; enabled: !root.busy-test && root.rows.length > 0; visible: !root.busy-test; clicked => { root.start-test(); } }
@@ -393,6 +395,19 @@ export component MainWindow inherits Window {
                     vertical-stretch: 1;
                     padding: 8px;
                     spacing: 8px;
+                    HorizontalLayout {
+                        spacing: 8px;
+                        Text {
+                            wrap: word-wrap;
+                            horizontal-stretch: 1;
+                            vertical-alignment: center;
+                            color: root.helper-installed ? Palette.foreground : #d9534f;
+                            text: root.helper-installed
+                                ? "Privileged helper is installed in /usr/lib/mirrorscope."
+                                : "The privileged helper and polkit policy are not installed system-wide. Writing the mirrorlist and the timer need them (one polkit prompt).";
+                        }
+                        Button { text: "Install helper & polkit policy…"; clicked => { root.install-helper(); } }
+                    }
                     Text {
                         wrap: word-wrap;
                         color: Palette.foreground;

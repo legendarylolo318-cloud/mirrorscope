@@ -59,8 +59,16 @@ thread_local! {
     static APP: RefCell<Option<App>> = const { RefCell::new(None) };
 }
 
+/// Borrow the app state. Uses `try_borrow_mut` so an unexpected re-entrant
+/// callback is dropped instead of panicking (which aborts with panic=abort).
 fn with_app<R>(f: impl FnOnce(&mut App) -> R) -> Option<R> {
-    APP.with(|a| a.borrow_mut().as_mut().map(f))
+    APP.with(|a| match a.try_borrow_mut() {
+        Ok(mut g) => g.as_mut().map(f),
+        Err(_) => {
+            eprintln!("mirrorscope: ignored re-entrant UI callback");
+            None
+        }
+    })
 }
 
 /// Run `f` on the UI thread with the window and app state.
@@ -368,6 +376,10 @@ fn save_config(app: &mut App) -> Result<(), String> {
 }
 
 fn do_fetch(ui: &MainWindow, app: &mut App) {
+    // Results of a running test would refer to the old list; stop it.
+    if let Some(c) = &app.cancel {
+        c.cancel();
+    }
     ui.set_busy_fetch(true);
     set_msg(ui, "Fetching mirror status…", false);
     let weak = ui.as_weak();
@@ -383,6 +395,7 @@ fn do_fetch(ui: &MainWindow, app: &mut App) {
                 Ok(doc) => {
                     app.all = doc.urls;
                     app.speeds.clear();
+                    app.overrides.clear();
                     refresh(ui, app);
                     set_msg(ui, format!("Loaded {} mirrors", app.all.len()), false);
                 }
@@ -822,6 +835,21 @@ fn wire(ui: &MainWindow) {
             });
         });
     });
+    cb!(on_install_helper, |ui, app| {
+        set_msg(&ui, "Waiting for authorization…", false);
+        let weak = ui.as_weak();
+        app.rt.spawn(async move {
+            let res = tokio::task::spawn_blocking(privileged::install_system_files).await;
+            on_ui(&weak, move |ui, _| match res {
+                Ok(Ok(m)) => {
+                    ui.set_helper_installed(privileged::helper_path().is_file());
+                    set_msg(ui, format!("Helper installed: {m}"), false)
+                }
+                Ok(Err(e)) => set_msg(ui, format!("Install failed: {e}"), true),
+                Err(e) => set_msg(ui, format!("Install failed: {e}"), true),
+            });
+        });
+    });
     cb!(on_units_remove, |ui, app| {
         set_msg(&ui, "Waiting for authorization…", false);
         let weak = ui.as_weak();
@@ -897,6 +925,7 @@ fn run_gui() -> anyhow::Result<()> {
     if let Some(e) = cfg_err {
         set_msg(&ui, format!("Config ignored: {e}"), true);
     }
+    ui.set_helper_installed(privileged::helper_path().is_file());
     APP.with(|a| *a.borrow_mut() = Some(app));
     wire(&ui);
 
@@ -917,13 +946,32 @@ fn run_gui() -> anyhow::Result<()> {
     });
 
     with_app(|app| do_fetch(&ui, app));
-    ui.run()?;
-    APP.with(|a| a.borrow_mut().take());
+    let res = ui.run();
+    // Don't block exit on in-flight work (e.g. a pending pkexec prompt).
+    if let Some(app) = APP.with(|a| a.borrow_mut().take()) {
+        if let Some(c) = &app.cancel {
+            c.cancel();
+        }
+        app.rt.shutdown_background();
+    }
+    res?;
     Ok(())
 }
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
+    if args.iter().skip(1).any(|a| a == "--install-helper") {
+        match privileged::install_system_files() {
+            Ok(m) => {
+                println!("{m}");
+                std::process::exit(0);
+            }
+            Err(e) => {
+                eprintln!("mirrorscope: {e}");
+                std::process::exit(1);
+            }
+        }
+    }
     if args.iter().skip(1).any(|a| a == "--cli") {
         std::process::exit(mirrorscope_cli::run(args));
     }

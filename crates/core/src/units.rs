@@ -5,8 +5,11 @@ use crate::{Error, Result};
 
 pub const SERVICE_NAME: &str = "mirrorscope-update.service";
 pub const TIMER_NAME: &str = "mirrorscope-update.timer";
-/// Fixed binary path used inside generated units (also enforced by the helper).
-pub const EXE_PATH: &str = "/usr/bin/mirrorscope";
+/// Fixed, root-owned binary path used inside generated units. The AppImage
+/// cannot be executed by systemd (root cannot read the FUSE mount, and the file
+/// lives in a user-writable location), so `mirrorscope --install-helper`
+/// installs a copy of the binary here alongside the helper.
+pub const EXE_PATH: &str = "/usr/lib/mirrorscope/mirrorscope";
 
 pub struct UnitFiles {
     pub service: String,
@@ -16,6 +19,7 @@ pub struct UnitFiles {
 /// Characters allowed in a config path embedded into a unit file.
 pub fn valid_config_path(p: &str) -> bool {
     p.starts_with('/')
+        && p.ends_with(".toml")
         && p.len() <= 200
         && !p.split('/').any(|seg| seg == "..")
         && p.chars()
@@ -41,7 +45,17 @@ After=network-online.target\n\
 Type=oneshot\n\
 ExecStart={EXE_PATH} --cli --config {config_path} --preset {preset} --save /etc/pacman.d/mirrorlist\n\
 Nice=19\n\
-IOSchedulingClass=idle\n"
+IOSchedulingClass=idle\n\
+NoNewPrivileges=yes\n\
+PrivateTmp=yes\n\
+ProtectSystem=strict\n\
+ReadWritePaths=/etc/pacman.d\n\
+ProtectHome=read-only\n\
+ProtectKernelTunables=yes\n\
+ProtectKernelModules=yes\n\
+ProtectControlGroups=yes\n\
+RestrictSUIDSGID=yes\n\
+LockPersonality=yes\n"
     );
     let timer = format!(
         "[Unit]\n\
@@ -80,5 +94,26 @@ mod tests {
         assert!(generate_units("ok", "relative/config.toml").is_err());
         assert!(generate_units("ok", "/x/../etc/shadow").is_err());
         assert!(generate_units("ok", "/x/a b").is_err());
+        assert!(generate_units("ok", "/etc/shadow").is_err());
+        assert!(generate_units("ok", "/x/c.toml;id").is_err());
+        assert!(generate_units("ok", "/x/c.toml\0").is_err());
+        assert!(generate_units("ok", "/x/%h.toml").is_err());
+        assert!(generate_units("ok", "/x/$HOME.toml").is_err());
+        assert!(generate_units("", "/x/c.toml").is_err());
+    }
+
+    #[test]
+    fn service_is_hardened_and_uses_fixed_binary() {
+        let u = generate_units("w", "/home/u/.config/mirrorscope/config.toml").unwrap();
+        assert!(u.service.contains(&format!("ExecStart={EXE_PATH} --cli")));
+        assert!(u.service.contains("ProtectSystem=strict"));
+        assert!(u.service.contains("ReadWritePaths=/etc/pacman.d"));
+        // only the expected directives, one per line
+        for l in u.service.lines().chain(u.timer.lines()) {
+            assert!(
+                l.is_empty() || l.starts_with('[') || l.contains('='),
+                "unexpected unit line {l:?}"
+            );
+        }
     }
 }
