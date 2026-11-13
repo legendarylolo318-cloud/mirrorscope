@@ -1,3 +1,5 @@
 /target
 *.AppImage
 /AppDir
+/dist
+/squashfs-root

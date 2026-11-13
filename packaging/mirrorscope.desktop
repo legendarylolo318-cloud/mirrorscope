@@ -6,6 +6,6 @@ Comment=Rank, test and write the Arch Linux pacman mirrorlist
 Exec=mirrorscope
 Icon=mirrorscope
 Terminal=false
-Categories=System;Settings;PackageManager;
+Categories=System;PackageManager;
 Keywords=pacman;mirror;mirrorlist;arch;reflector;
 StartupNotify=true

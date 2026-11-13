@@ -1,7 +1,13 @@
 name: CI
 on:
   push:
+    branches: ["**"]
+    tags: ["v*"]
   pull_request:
+
+permissions:
+  contents: read
+
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -9,7 +15,7 @@ jobs:
     steps:
       - name: Install dependencies
         run: |
-          pacman -Syu --noconfirm base-devel git rust fontconfig libxkbcommon wayland libx11 libxcursor libxrandr libxi mesa
+          pacman -Syu --noconfirm --needed base-devel git rust fontconfig libxkbcommon wayland libx11 libxcursor libxrandr libxi mesa
       - uses: actions/checkout@v4
       - name: Format
         run: cargo fmt --all -- --check
@@ -17,3 +23,41 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Test
         run: cargo test --workspace
+
+  appimage:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: test
+    runs-on: ubuntu-latest
+    container: archlinux:latest
+    permissions:
+      contents: write
+    steps:
+      - name: Install dependencies
+        run: |
+          pacman -Syu --noconfirm --needed base-devel git rust curl fontconfig libxkbcommon wayland github-cli
+      - uses: actions/checkout@v4
+      - name: Check tag matches Cargo version
+        run: |
+          v=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          test "v$v" = "$GITHUB_REF_NAME" || { echo "tag $GITHUB_REF_NAME != v$v"; exit 1; }
+      - name: Build AppImage
+        run: ./build-appimage.sh
+      - name: Smoke test
+        run: |
+          ./dist/mirrorscope-*-x86_64.AppImage --appimage-extract-and-run --cli --version
+          cd dist && sha256sum -c *.sha256
+      - name: Upload to release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" dist/*.AppImage dist/*.sha256 --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" dist/*.AppImage dist/*.sha256 \
+              --title "mirrorscope $GITHUB_REF_NAME" --generate-notes
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: appimage
+          path: dist/*
