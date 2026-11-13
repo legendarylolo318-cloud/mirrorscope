@@ -2,6 +2,67 @@ use chrono::{DateTime, Utc};
 
 use crate::Mirror;
 
+const SUFFIX: &str = "$repo/os/$arch";
+
+fn valid_host(host: &str) -> bool {
+    // hostname or IPv4 with optional :port. No userinfo, no IPv6 literals.
+    let (name, port) = match host.rsplit_once(':') {
+        Some((n, p)) => (n, Some(p)),
+        None => (host, None),
+    };
+    if let Some(p) = port {
+        if p.is_empty() || p.len() > 5 || !p.chars().all(|c| c.is_ascii_digit()) {
+            return false;
+        }
+        if !matches!(p.parse::<u32>(), Ok(1..=65535)) {
+            return false;
+        }
+    }
+    !name.is_empty()
+        && name.len() <= 253
+        && !name.starts_with(['.', '-'])
+        && !name.ends_with(['.', '-'])
+        && !name.contains("..")
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-')
+}
+
+/// Validate the URL part of a `Server = ` line.
+pub fn valid_server_url(url: &str) -> bool {
+    let Some(rest) = ["https://", "http://", "rsync://"]
+        .iter()
+        .find_map(|p| url.strip_prefix(p))
+    else {
+        return false;
+    };
+    let Some(body) = rest.strip_suffix(SUFFIX) else {
+        return false;
+    };
+    // body is "host[:port]/path/" and must end with '/'
+    let Some(body) = body.strip_suffix('/') else {
+        return false;
+    };
+    let (host, path) = match body.split_once('/') {
+        Some((h, p)) => (h, p),
+        None => (body, ""),
+    };
+    if !valid_host(host) {
+        return false;
+    }
+    if path.is_empty() {
+        return true;
+    }
+    path.split('/').all(|seg| {
+        !seg.is_empty()
+            && seg != "."
+            && !seg.contains("..")
+            && seg
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | '~' | '+'))
+    })
+}
+
 /// Information embedded in the mirrorlist header comment.
 pub struct HeaderInfo<'a> {
     pub when: DateTime<Utc>,
@@ -11,10 +72,63 @@ pub struct HeaderInfo<'a> {
 }
 
 /// Make a string safe to embed in a single comment line.
+///
+/// The helper only accepts printable ASCII in comments, so control characters
+/// become spaces and common accented Latin letters are transliterated
+/// (`Réunion` -> `Reunion`, `Türkiye` -> `Turkiye`); anything else becomes `?`.
 pub fn sanitize_comment(s: &str) -> String {
     s.chars()
-        .map(|c| if c.is_control() { ' ' } else { c })
+        .map(|c| match c {
+            ' '..='~' | '\t' => c,
+            c if c.is_control() => ' ',
+            c => transliterate(c),
+        })
         .collect()
+}
+
+fn transliterate(c: char) -> char {
+    const TABLE: &[(&str, char)] = &[
+        ("àáâãäåāăą", 'a'),
+        ("ÀÁÂÃÄÅĀĂĄ", 'A'),
+        ("çćĉċč", 'c'),
+        ("ÇĆĈĊČ", 'C'),
+        ("ďđ", 'd'),
+        ("ĎĐ", 'D'),
+        ("èéêëēĕėęě", 'e'),
+        ("ÈÉÊËĒĔĖĘĚ", 'E'),
+        ("ğĝġģ", 'g'),
+        ("ĞĜĠĢ", 'G'),
+        ("ìíîïĩīĭįı", 'i'),
+        ("ÌÍÎÏĨĪĬĮİ", 'I'),
+        ("łľĺļ", 'l'),
+        ("ŁĽĹĻ", 'L'),
+        ("ñńňņ", 'n'),
+        ("ÑŃŇŅ", 'N'),
+        ("òóôõöøōŏő", 'o'),
+        ("ÒÓÔÕÖØŌŎŐ", 'O'),
+        ("ŕřŗ", 'r'),
+        ("ŔŘŖ", 'R'),
+        ("śšşŝș", 's'),
+        ("ŚŠŞŜȘ", 'S'),
+        ("ťţț", 't'),
+        ("ŤŢȚ", 'T'),
+        ("ùúûüũūŭůűų", 'u'),
+        ("ÙÚÛÜŨŪŬŮŰŲ", 'U'),
+        ("ýÿ", 'y'),
+        ("ÝŸ", 'Y'),
+        ("źżž", 'z'),
+        ("ŹŻŽ", 'Z'),
+    ];
+    TABLE
+        .iter()
+        .find(|(set, _)| set.contains(c))
+        .map(|(_, r)| *r)
+        .unwrap_or('?')
+}
+
+/// Whether this mirror's `Server = ` line would pass the helper's validation.
+pub fn mirror_url_ok(m: &Mirror) -> bool {
+    valid_server_url(&format!("{}{SUFFIX}", m.base_url()))
 }
 
 /// The `Server = ` line for a mirror.
@@ -72,6 +186,16 @@ mod tests {
         for l in out.lines() {
             assert!(l.is_empty() || l.starts_with('#') || l.starts_with("Server = "));
         }
+    }
+
+    #[test]
+    fn comments_are_printable_ascii() {
+        assert_eq!(
+            sanitize_comment("country=Réunion,Türkiye"),
+            "country=Reunion,Turkiye"
+        );
+        assert_eq!(sanitize_comment("a\nb\u{1b}c\u{2028}d日"), "a b c?d?");
+        assert!(sanitize_comment("Ω≈ç√∫").is_ascii());
     }
 
     #[test]

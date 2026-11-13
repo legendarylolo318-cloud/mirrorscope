@@ -9,6 +9,7 @@ description = "Privileged helper for mirrorscope (run via pkexec)"
 chrono.workspace = true
 mirrorscope-core.workspace = true
 thiserror.workspace = true
+libc = "0.2"
 
 [dev-dependencies]
 tempfile.workspace = true

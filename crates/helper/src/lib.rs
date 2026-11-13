@@ -4,8 +4,8 @@
 //! without root. The binary wires it to `/etc/pacman.d` and `/etc/systemd/system`.
 
 use std::fs::{self, File, OpenOptions};
-use std::io::Write;
-use std::os::unix::fs::OpenOptionsExt;
+use std::io::{Read, Write};
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::Path;
 
 use chrono::Utc;
@@ -13,7 +13,7 @@ use mirrorscope_core::backups::{valid_backup_name, BACKUP_PREFIX};
 use thiserror::Error;
 
 pub const MAX_INPUT_BYTES: usize = 256 * 1024;
-const SUFFIX: &str = "$repo/os/$arch";
+pub use mirrorscope_core::mirrorlist::valid_server_url;
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum ValidationError {
@@ -51,62 +51,6 @@ fn io_err(path: &Path, source: std::io::Error) -> HelperError {
         path: path.display().to_string(),
         source,
     }
-}
-
-fn valid_host(host: &str) -> bool {
-    // hostname or IPv4 with optional :port. No userinfo, no IPv6 literals.
-    let (name, port) = match host.rsplit_once(':') {
-        Some((n, p)) => (n, Some(p)),
-        None => (host, None),
-    };
-    if let Some(p) = port {
-        if p.is_empty() || p.len() > 5 || !p.chars().all(|c| c.is_ascii_digit()) {
-            return false;
-        }
-    }
-    !name.is_empty()
-        && name.len() <= 253
-        && !name.starts_with(['.', '-'])
-        && !name.ends_with(['.', '-'])
-        && !name.contains("..")
-        && name
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-')
-}
-
-/// Validate the URL part of a `Server = ` line.
-pub fn valid_server_url(url: &str) -> bool {
-    let Some(rest) = ["https://", "http://", "rsync://"]
-        .iter()
-        .find_map(|p| url.strip_prefix(p))
-    else {
-        return false;
-    };
-    let Some(body) = rest.strip_suffix(SUFFIX) else {
-        return false;
-    };
-    // body is "host[:port]/path/" and must end with '/'
-    let Some(body) = body.strip_suffix('/') else {
-        return false;
-    };
-    let (host, path) = match body.split_once('/') {
-        Some((h, p)) => (h, p),
-        None => (body, ""),
-    };
-    if !valid_host(host) {
-        return false;
-    }
-    if path.is_empty() {
-        return true;
-    }
-    path.split('/').all(|seg| {
-        !seg.is_empty()
-            && seg != "."
-            && seg != ".."
-            && seg
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | '~' | '+'))
-    })
 }
 
 /// Validate a complete mirrorlist. Only comments, blank lines and
@@ -147,20 +91,89 @@ pub fn validate_mirrorlist(text: &str) -> Result<(), ValidationError> {
     Ok(())
 }
 
-/// Write `content` to `dir/name` atomically: temp file, fsync, rename, fsync dir.
+/// Open `path` for reading without following symlinks and read it, refusing
+/// anything that is not a regular file of at most `MAX_INPUT_BYTES`.
+/// The type/size check is done on the opened descriptor (no TOCTOU window).
+fn read_regular_nofollow(path: &Path) -> Result<Option<Vec<u8>>, HelperError> {
+    let mut f = match OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)
+    {
+        Ok(f) => f,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) if e.raw_os_error() == Some(libc::ELOOP) => {
+            return Err(HelperError::Invalid(format!(
+                "{} is a symlink; refusing to use it",
+                path.display()
+            )))
+        }
+        Err(e) => return Err(io_err(path, e)),
+    };
+    let md = f.metadata().map_err(|e| io_err(path, e))?;
+    if !md.is_file() {
+        return Err(HelperError::Invalid(format!(
+            "{} is not a regular file; refusing to use it",
+            path.display()
+        )));
+    }
+    if md.len() > MAX_INPUT_BYTES as u64 {
+        return Err(HelperError::Invalid(format!(
+            "{} is too large",
+            path.display()
+        )));
+    }
+    let mut buf = Vec::with_capacity(md.len() as usize);
+    (&mut f)
+        .take(MAX_INPUT_BYTES as u64 + 1)
+        .read_to_end(&mut buf)
+        .map_err(|e| io_err(path, e))?;
+    if buf.len() > MAX_INPUT_BYTES {
+        return Err(HelperError::Invalid(format!(
+            "{} is too large",
+            path.display()
+        )));
+    }
+    Ok(Some(buf))
+}
+
+/// Write `content` to `dir/name` atomically: temp file (O_EXCL|O_NOFOLLOW),
+/// fsync, rename, fsync dir. Refuses to replace a destination that exists
+/// but is not a regular file (symlink, directory, device, ...).
 pub fn write_atomic(dir: &Path, name: &str, content: &[u8]) -> Result<(), HelperError> {
+    if name.is_empty() || name.contains('/') || name.starts_with('.') {
+        return Err(HelperError::Invalid(format!("invalid file name {name:?}")));
+    }
+    let dest = dir.join(name);
+    match fs::symlink_metadata(&dest) {
+        Ok(md) if !md.file_type().is_file() => {
+            return Err(HelperError::Invalid(format!(
+                "{} exists and is not a regular file; refusing to replace it",
+                dest.display()
+            )))
+        }
+        Ok(_) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(io_err(&dest, e)),
+    }
     let tmp = dir.join(format!(".{name}.tmp.{}", std::process::id()));
+    // A stale temp file from a crashed run with a recycled PID would make
+    // O_EXCL fail forever. remove_file never follows symlinks.
+    let _ = fs::remove_file(&tmp);
     let result = (|| {
         let mut f = OpenOptions::new()
             .write(true)
             .create_new(true)
+            .custom_flags(libc::O_NOFOLLOW)
             .mode(0o644)
             .open(&tmp)
+            .map_err(|e| io_err(&tmp, e))?;
+        // mode() is subject to the umask; force 0644 explicitly.
+        f.set_permissions(fs::Permissions::from_mode(0o644))
             .map_err(|e| io_err(&tmp, e))?;
         f.write_all(content).map_err(|e| io_err(&tmp, e))?;
         f.sync_all().map_err(|e| io_err(&tmp, e))?;
         drop(f);
-        let dest = dir.join(name);
         fs::rename(&tmp, &dest).map_err(|e| io_err(&dest, e))?;
         if let Ok(d) = File::open(dir) {
             let _ = d.sync_all();
@@ -176,21 +189,13 @@ pub fn write_atomic(dir: &Path, name: &str, content: &[u8]) -> Result<(), Helper
 /// Copy the current mirrorlist (if any) to `mirrorlist.bak.<timestamp>`; returns the backup name.
 pub fn backup_current(dir: &Path) -> Result<Option<String>, HelperError> {
     let src = dir.join("mirrorlist");
-    let md = match fs::symlink_metadata(&src) {
-        Ok(m) => m,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => return Err(io_err(&src, e)),
+    let Some(data) = read_regular_nofollow(&src)? else {
+        return Ok(None);
     };
-    if !md.is_file() {
-        return Err(HelperError::Invalid(
-            "current mirrorlist is not a regular file; refusing to back it up".into(),
-        ));
-    }
-    let data = fs::read(&src).map_err(|e| io_err(&src, e))?;
     let stamp = Utc::now().format("%Y%m%d-%H%M%S");
     let mut name = format!("{BACKUP_PREFIX}{stamp}");
     let mut n = 1;
-    while dir.join(&name).exists() {
+    while fs::symlink_metadata(dir.join(&name)).is_ok() {
         name = format!("{BACKUP_PREFIX}{stamp}-{n}");
         n += 1;
     }
@@ -212,13 +217,10 @@ pub fn restore_backup(dir: &Path, backup_name: &str) -> Result<Option<String>, H
         return Err(HelperError::Invalid("invalid backup name".into()));
     }
     let path = dir.join(backup_name);
-    let md = fs::symlink_metadata(&path).map_err(|e| io_err(&path, e))?;
-    if !md.is_file() || md.len() as usize > MAX_INPUT_BYTES {
-        return Err(HelperError::Invalid(
-            "backup is not a regular, reasonably sized file".into(),
-        ));
-    }
-    let text = fs::read_to_string(&path).map_err(|e| io_err(&path, e))?;
+    let data = read_regular_nofollow(&path)?
+        .ok_or_else(|| HelperError::Invalid(format!("backup {backup_name} not found")))?;
+    let text = String::from_utf8(data)
+        .map_err(|_| HelperError::Invalid("backup is not valid UTF-8".into()))?;
     write_mirrorlist(dir, &text)
 }
 
@@ -437,5 +439,347 @@ mod tests {
         assert!(d.path().join("mirrorscope-update.timer").is_file());
         assert!(install_units(d.path(), "bad name", "/x/config.toml").is_err());
         assert!(install_units(d.path(), "ok", "/x/y\nExecStart=/bin/sh").is_err());
+    }
+
+    // ---------------------------------------------------------------
+    // Adversarial / fuzz-style tests
+    // ---------------------------------------------------------------
+
+    /// Independent, deliberately simple re-statement of what may reach
+    /// /etc/pacman.d/mirrorlist. Anything the validator accepts must pass this.
+    fn independently_safe(text: &str) -> bool {
+        text.split('\n').all(|l| {
+            if l.is_empty() {
+                return true;
+            }
+            if l.starts_with('#') {
+                return l.bytes().all(|b| b == b'\t' || (0x20..0x7f).contains(&b));
+            }
+            let Some(u) = l.strip_prefix("Server = ") else {
+                return false;
+            };
+            (u.starts_with("https://") || u.starts_with("http://") || u.starts_with("rsync://"))
+                && u.ends_with("/$repo/os/$arch")
+                && !u.contains("..")
+                && !u.contains('@')
+                && u.matches("$repo").count() == 1
+                && u.matches("$arch").count() == 1
+                && u.bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b"./:_~+-$".contains(&b))
+        })
+    }
+
+    /// Small deterministic PRNG so the test needs no extra crates.
+    struct XorShift(u64);
+    impl XorShift {
+        fn next(&mut self) -> u64 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            self.0
+        }
+        fn below(&mut self, n: usize) -> usize {
+            (self.next() % n as u64) as usize
+        }
+    }
+
+    const NASTY: &[&str] = &[
+        "\n",
+        "\r",
+        "\r\n",
+        "\0",
+        "\t",
+        "\u{7f}",
+        "\u{1b}",
+        "\u{85}",
+        "\u{2028}",
+        "\u{2029}",
+        "\u{feff}",
+        "\u{200b}",
+        "\u{202e}",
+        " ",
+        "/",
+        "..",
+        "../",
+        "@",
+        ":",
+        "%",
+        "%0a",
+        "$",
+        "$(id)",
+        "`",
+        ";",
+        "&",
+        "|",
+        "'",
+        "\"",
+        "\\",
+        "?",
+        "#",
+        "[",
+        "]",
+        "Include = /x",
+        "\nInclude = /etc/shadow",
+        "\nServer = file:///etc/",
+        "é",
+        "ⅰ",
+        "\u{ff0f}",
+    ];
+
+    #[test]
+    fn fuzz_mutations_never_accept_unsafe_lines() {
+        let mut rng = XorShift(0x9E37_79B9_7F4A_7C15);
+        let base = GOOD.to_string();
+        let mut accepted = 0;
+        for _ in 0..20_000 {
+            let mut t: Vec<char> = base.chars().collect();
+            for _ in 0..1 + rng.below(3) {
+                let pos = rng.below(t.len() + 1);
+                match rng.below(3) {
+                    0 => {
+                        let ins: Vec<char> = NASTY[rng.below(NASTY.len())].chars().collect();
+                        t.splice(pos..pos, ins);
+                    }
+                    1 if pos < t.len() => {
+                        t.remove(pos);
+                    }
+                    _ if pos < t.len() => {
+                        t[pos] = char::from_u32(rng.below(0x3000) as u32).unwrap_or('x');
+                    }
+                    _ => {}
+                }
+            }
+            let text: String = t.into_iter().collect();
+            if validate_mirrorlist(&text).is_ok() {
+                accepted += 1;
+                assert!(independently_safe(&text), "accepted unsafe input: {text:?}");
+            }
+        }
+        // sanity: mutations inside comments etc. still pass sometimes
+        assert!(accepted > 0);
+    }
+
+    #[test]
+    fn nasty_insertions_at_every_position_of_a_server_line() {
+        let line = "Server = https://m.example:8443/arch/linux/$repo/os/$arch";
+        for i in 0..=line.len() {
+            if !line.is_char_boundary(i) {
+                continue;
+            }
+            for n in NASTY {
+                let text = format!("{}{}{}\n", &line[..i], n, &line[i..]);
+                if validate_mirrorlist(&text).is_ok() {
+                    assert!(independently_safe(&text), "accepted {text:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn unicode_and_line_separator_tricks_rejected() {
+        let ok = "Server = https://ok.example/$repo/os/$arch";
+        for text in [
+            format!("{ok}\u{2028}Include = /x\n"),
+            format!("{ok}\u{85}Include = /x\n"),
+            format!("\u{feff}{ok}\n"),
+            format!("#\u{feff}\n{ok}\n"),
+            format!("# \u{202e}gnp.exe\n{ok}\n"),
+            "Server = https://ok.example\u{ff0f}$repo/os/$arch\n".to_string(),
+            "Server\u{a0}= https://ok.example/$repo/os/$arch\n".to_string(),
+            format!("{ok}\n\0"),
+            format!("{ok}\n\u{0c}"),
+            format!("{ok}\n[core]\nInclude = /etc/pacman.d/evil\n"),
+        ] {
+            assert!(validate_mirrorlist(&text).is_err(), "accepted {text:?}");
+        }
+    }
+
+    #[test]
+    fn ports_are_range_checked() {
+        assert!(valid_server_url("https://m.example:443/$repo/os/$arch"));
+        assert!(valid_server_url("https://m.example:65535/$repo/os/$arch"));
+        assert!(!valid_server_url("https://m.example:0/$repo/os/$arch"));
+        assert!(!valid_server_url("https://m.example:65536/$repo/os/$arch"));
+        assert!(!valid_server_url("https://m.example:1:2/$repo/os/$arch"));
+    }
+
+    #[test]
+    fn size_limit_boundary() {
+        let line = "Server = https://ok.example/$repo/os/$arch\n";
+        let mut text = String::from(line);
+        while text.len() + 2 <= MAX_INPUT_BYTES {
+            text.push_str("#\n");
+        }
+        assert!(text.len() <= MAX_INPUT_BYTES);
+        assert_eq!(validate_mirrorlist(&text), Ok(()));
+        text.push_str("##");
+        assert!(text.len() > MAX_INPUT_BYTES);
+        assert_eq!(validate_mirrorlist(&text), Err(ValidationError::TooLarge));
+    }
+
+    #[test]
+    fn generated_mirrorlist_from_fixture_passes_helper() {
+        use mirrorscope_core::mirrorlist::{generate, HeaderInfo};
+        use mirrorscope_core::{Mirror, StatusDocument};
+        let doc =
+            StatusDocument::parse(include_str!("../../core/tests/fixtures/status.json")).unwrap();
+        let now = "2026-11-12T10:00:00Z".parse().unwrap();
+        let cfg = mirrorscope_core::FilterConfig {
+            protocols: vec![
+                mirrorscope_core::Protocol::Https,
+                mirrorscope_core::Protocol::Http,
+                mirrorscope_core::Protocol::Rsync,
+            ],
+            min_completion_pct: 0.0,
+            ..Default::default()
+        };
+        let list = mirrorscope_core::filter::filter_mirrors(&doc.urls, &cfg, now).unwrap();
+        let refs: Vec<&Mirror> = list.iter().collect();
+        let text = generate(
+            &refs,
+            &HeaderInfo {
+                when: now,
+                filters: "weird\nfilter\u{1b}[31m\u{e9}",
+                sort: "score",
+                source: "https://archlinux.org/mirrors/status/json/",
+            },
+        );
+        assert_eq!(validate_mirrorlist(&text), Ok(()), "{text}");
+        assert!(independently_safe(&text));
+    }
+
+    #[test]
+    fn live_sample_with_non_ascii_countries_passes_helper() {
+        use mirrorscope_core::mirrorlist::{generate, HeaderInfo};
+        use mirrorscope_core::{FilterConfig, Mirror, StatusDocument};
+        let doc = StatusDocument::parse(include_str!(
+            "../../core/tests/fixtures/status-live-sample.json"
+        ))
+        .unwrap();
+        let cfg = FilterConfig {
+            countries: vec!["Réunion".into(), "Türkiye".into(), "de".into()],
+            protocols: vec![
+                mirrorscope_core::Protocol::Https,
+                mirrorscope_core::Protocol::Http,
+            ],
+            min_completion_pct: 0.0,
+            ..Default::default()
+        };
+        let now = chrono::Utc::now();
+        let list = mirrorscope_core::filter::filter_mirrors(&doc.urls, &cfg, now).unwrap();
+        assert!(!list.is_empty());
+        let refs: Vec<&Mirror> = list.iter().collect();
+        let text = generate(
+            &refs,
+            &HeaderInfo {
+                when: now,
+                filters: &cfg.describe(),
+                sort: "score",
+                source: "https://archlinux.org/mirrors/status/json/",
+            },
+        );
+        assert!(text.contains("country=Reunion,Turkiye,de"));
+        assert_eq!(validate_mirrorlist(&text), Ok(()), "{text}");
+    }
+
+    #[test]
+    fn refuses_symlinked_mirrorlist() {
+        let d = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let victim = outside.path().join("shadow");
+        fs::write(&victim, "secret").unwrap();
+        std::os::unix::fs::symlink(&victim, d.path().join("mirrorlist")).unwrap();
+        assert!(write_mirrorlist(d.path(), GOOD).is_err());
+        assert_eq!(fs::read_to_string(&victim).unwrap(), "secret");
+        // the symlink itself is left alone and no backup of the victim is made
+        assert!(fs::symlink_metadata(d.path().join("mirrorlist"))
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(fs::read_dir(d.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn refuses_directory_or_fifo_mirrorlist() {
+        let d = tempfile::tempdir().unwrap();
+        fs::create_dir(d.path().join("mirrorlist")).unwrap();
+        assert!(write_mirrorlist(d.path(), GOOD).is_err());
+
+        let d = tempfile::tempdir().unwrap();
+        let fifo = d.path().join("mirrorlist.bak.1");
+        let st = std::process::Command::new("mkfifo").arg(&fifo).status();
+        if matches!(st, Ok(s) if s.success()) {
+            // must not hang (O_NONBLOCK) and must be refused
+            assert!(restore_backup(d.path(), "mirrorlist.bak.1").is_err());
+        }
+    }
+
+    #[test]
+    fn planted_temp_symlink_is_not_followed() {
+        let d = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let victim = outside.path().join("victim");
+        fs::write(&victim, "keep").unwrap();
+        let tmp = d
+            .path()
+            .join(format!(".mirrorlist.tmp.{}", std::process::id()));
+        std::os::unix::fs::symlink(&victim, &tmp).unwrap();
+        write_mirrorlist(d.path(), GOOD).unwrap();
+        assert_eq!(fs::read_to_string(&victim).unwrap(), "keep");
+        assert_eq!(
+            fs::read_to_string(d.path().join("mirrorlist")).unwrap(),
+            GOOD
+        );
+        assert!(fs::symlink_metadata(&tmp).is_err());
+    }
+
+    #[test]
+    fn written_file_mode_is_0644() {
+        let d = tempfile::tempdir().unwrap();
+        write_mirrorlist(d.path(), GOOD).unwrap();
+        let mode = fs::metadata(d.path().join("mirrorlist"))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o644);
+    }
+
+    #[test]
+    fn write_atomic_rejects_path_names() {
+        let d = tempfile::tempdir().unwrap();
+        for n in ["", "../x", "a/b", ".hidden", "/etc/passwd"] {
+            assert!(write_atomic(d.path(), n, b"x").is_err(), "{n}");
+        }
+    }
+
+    #[test]
+    fn backup_preserves_exact_bytes() {
+        let d = tempfile::tempdir().unwrap();
+        let old = "# old\r\nweird but existing content \u{1b}\n";
+        fs::write(d.path().join("mirrorlist"), old).unwrap();
+        let b = write_mirrorlist(d.path(), GOOD).unwrap().unwrap();
+        assert_eq!(fs::read_to_string(d.path().join(b)).unwrap(), old);
+    }
+
+    #[test]
+    fn install_units_rejects_everything_suspicious() {
+        let d = tempfile::tempdir().unwrap();
+        for (preset, cfg) in [
+            ("weekly", "/etc/shadow"),
+            ("weekly", "relative.toml"),
+            ("weekly", "/a/../b.toml"),
+            ("weekly", "/a/b c.toml"),
+            ("weekly", "/a/%n.toml"),
+            ("weekly", "/a/b.toml\n[Service]\nExecStartPre=/bin/sh"),
+            ("we ekly", "/a/b.toml"),
+            ("weekly\n", "/a/b.toml"),
+            ("$(id)", "/a/b.toml"),
+        ] {
+            assert!(
+                install_units(d.path(), preset, cfg).is_err(),
+                "{preset:?} {cfg:?}"
+            );
+        }
+        assert_eq!(fs::read_dir(d.path()).unwrap().count(), 0);
     }
 }

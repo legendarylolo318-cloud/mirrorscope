@@ -2773,6 +2773,7 @@ name = "mirrorscope-helper"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "libc",
  "mirrorscope-core",
  "tempfile",
  "thiserror 2.0.21",

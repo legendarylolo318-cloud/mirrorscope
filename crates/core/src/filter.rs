@@ -99,6 +99,10 @@ impl CompiledFilter {
         if !m.active || m.url.is_empty() {
             return false;
         }
+        // A URL the privileged helper would reject would make every write fail.
+        if !crate::mirrorlist::mirror_url_ok(m) {
+            return false;
+        }
         if !self.cfg.protocols.contains(&m.protocol) {
             return false;
         }
@@ -272,6 +276,26 @@ mod tests {
                 "https://us2.example.org/archlinux/"
             ]
         );
+    }
+
+    #[test]
+    fn drops_mirrors_with_unwritable_urls() {
+        let (mut m, now) = data();
+        let good = m[0].clone();
+        for bad in [
+            "https://evil.example/arch/\nInclude = /etc/x/",
+            "https://[2001:db8::1]/arch/",
+            "https://user@host.example/arch/",
+            "https://host.example/a%20b/",
+            "https://host.example:0/arch/",
+        ] {
+            let mut x = good.clone();
+            x.url = bad.into();
+            m.push(x);
+        }
+        let r = filter_mirrors(&m, &FilterConfig::default(), now).unwrap();
+        assert_eq!(r.len(), 4);
+        assert!(r.iter().all(crate::mirrorlist::mirror_url_ok));
     }
 
     #[test]
