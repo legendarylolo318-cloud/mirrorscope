@@ -1,0 +1,18 @@
+{
+  "cutoff": 86400,
+  "last_check": "2026-11-12T10:00:00Z",
+  "num_checks": 5,
+  "check_frequency": 300,
+  "version": 3,
+  "urls": [
+    {"url":"https://de1.example.org/archlinux/","protocol":"https","last_sync":"2026-11-12T09:00:00Z","completion_pct":1.0,"delay":612,"duration_avg":0.41,"duration_stddev":0.2,"score":1.1,"active":true,"country":"Germany","country_code":"DE","isos":true,"ipv4":true,"ipv6":true,"details":"https://archlinux.org/mirrors/de1/"},
+    {"url":"http://de2.example.org/archlinux/","protocol":"http","last_sync":"2026-11-12T08:30:00Z","completion_pct":1.0,"delay":1500,"duration_avg":0.5,"duration_stddev":0.3,"score":2.4,"active":true,"country":"Germany","country_code":"DE","isos":false,"ipv4":true,"ipv6":false,"details":"x"},
+    {"url":"https://fr1.example.org/arch/","protocol":"https","last_sync":"2026-11-11T02:00:00Z","completion_pct":1.0,"delay":30000,"duration_avg":0.9,"duration_stddev":0.5,"score":9.5,"active":true,"country":"France","country_code":"FR","isos":true,"ipv4":true,"ipv6":true,"details":"x"},
+    {"url":"https://fr2.example.org/arch/","protocol":"https","last_sync":"2026-11-12T09:30:00Z","completion_pct":0.93,"delay":900,"duration_avg":0.3,"duration_stddev":0.1,"score":1.9,"active":true,"country":"France","country_code":"FR","isos":true,"ipv4":true,"ipv6":false,"details":"x"},
+    {"url":"rsync://us1.example.org/archlinux/","protocol":"rsync","last_sync":"2026-11-12T09:10:00Z","completion_pct":1.0,"delay":700,"duration_avg":0.6,"duration_stddev":0.2,"score":3.0,"active":true,"country":"United States","country_code":"US","isos":true,"ipv4":true,"ipv6":true,"details":"x"},
+    {"url":"https://us2.example.org/archlinux/","protocol":"https","last_sync":"2026-11-12T09:40:00Z","completion_pct":1.0,"delay":300,"duration_avg":0.2,"duration_stddev":0.1,"score":0.8,"active":true,"country":"United States","country_code":"US","isos":true,"ipv4":true,"ipv6":true,"details":"x"},
+    {"url":"https://dead.example.org/archlinux/","protocol":"https","last_sync":null,"completion_pct":null,"delay":null,"duration_avg":null,"duration_stddev":null,"score":null,"active":false,"country":"","country_code":"","isos":false,"ipv4":true,"ipv6":false,"details":"x"},
+    {"url":"ftp://old.example.org/archlinux/","protocol":"ftp","last_sync":"2026-11-12T01:00:00Z","completion_pct":1.0,"delay":100,"duration_avg":0.1,"duration_stddev":0.1,"score":1.0,"active":true,"country":"Sweden","country_code":"SE","isos":false,"ipv4":true,"ipv6":false,"details":"x"},
+    {"url":"https://se1.example.org/archlinux/","protocol":"https","last_sync":"2026-11-12T09:55:00Z","completion_pct":1.0,"delay":200,"duration_avg":0.25,"duration_stddev":0.1,"score":0.9,"active":true,"country":"Sweden","country_code":"SE","isos":true,"ipv4":false,"ipv6":true,"details":"x"}
+  ]
+}

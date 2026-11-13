@@ -1,0 +1,19 @@
+[package]
+name = "mirrorscope"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Native Arch Linux mirrorlist manager (GUI + CLI)"
+build = "build.rs"
+
+[dependencies]
+anyhow.workspace = true
+chrono.workspace = true
+mirrorscope-cli.workspace = true
+mirrorscope-core.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+slint = { version = "1.18", default-features = false, features = ["std", "backend-winit", "renderer-software", "compat-1-2"] }
+
+[build-dependencies]
+slint-build = "1.18"

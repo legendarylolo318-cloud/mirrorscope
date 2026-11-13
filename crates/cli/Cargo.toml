@@ -1,0 +1,15 @@
+[package]
+name = "mirrorscope-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Headless CLI for mirrorscope"
+
+[dependencies]
+reqwest.workspace = true
+anyhow.workspace = true
+chrono.workspace = true
+clap.workspace = true
+mirrorscope-core.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true

@@ -1,0 +1,456 @@
+import { Button, CheckBox, ComboBox, LineEdit, ListView, SpinBox, TextEdit, ProgressIndicator, Palette, ScrollView } from "std-widgets.slint";
+
+export struct Row {
+    checked: bool,
+    url: string,
+    country: string,
+    protocol: string,
+    last-sync: string,
+    delay: string,
+    score: string,
+    speed: string,
+    completion: string,
+    /// 0 idle, 1 testing, 2 ok, 3 failed
+    state: int,
+}
+
+export struct CountryRow {
+    name: string,
+    count: int,
+    checked: bool,
+}
+
+export struct BackupRow {
+    name: string,
+    size: string,
+}
+
+component Header inherits Rectangle {
+    in property <string> text;
+    in property <int> idx;
+    in property <int> sort-col;
+    in property <bool> sort-desc;
+    in property <bool> sortable: true;
+    callback clicked();
+    ta := TouchArea {
+        enabled: root.sortable;
+        mouse-cursor: root.sortable ? MouseCursor.pointer : MouseCursor.default;
+        clicked => { root.clicked(); }
+    }
+    background: ta.has-hover && root.sortable ? Palette.alternate-background : transparent;
+    HorizontalLayout {
+        padding-left: 4px;
+        padding-right: 4px;
+        alignment: start;
+        Text {
+            text: root.text + (root.sort-col == root.idx ? (root.sort-desc ? " ▼" : " ▲") : "");
+            font-weight: 700;
+            color: Palette.foreground;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+    }
+}
+
+component Cell inherits Text {
+    color: Palette.foreground;
+    vertical-alignment: center;
+    overflow: elide;
+}
+
+component SectionTitle inherits Text {
+    font-weight: 700;
+    font-size: 12px;
+    color: Palette.accent-background;
+}
+
+export component MainWindow inherits Window {
+    title: "mirrorscope";
+    min-width: 1000px;
+    min-height: 640px;
+    preferred-width: 1360px;
+    preferred-height: 860px;
+    background: Palette.background;
+
+    // ---- filter state -------------------------------------------------
+    in-out property <bool> p-https: true;
+    in-out property <bool> p-http: false;
+    in-out property <bool> p-rsync: false;
+    in-out property <int> age-hours: 0;
+    in-out property <int> completion: 100;
+    in-out property <bool> ipv4: false;
+    in-out property <bool> ipv6: false;
+    in-out property <string> include-re;
+    in-out property <string> exclude-re;
+    in-out property <int> number: 10;
+    in-out property <int> concurrency: 8;
+    in-out property <int> timeout-secs: 5;
+    in-out property <string> country-search;
+    in property <[CountryRow]> countries;
+
+    // ---- data ---------------------------------------------------------
+    in property <[Row]> rows;
+    in property <string> preview;
+    in property <string> status-text;
+    in property <string> message;
+    in property <bool> message-error: false;
+    in property <bool> busy-fetch: false;
+    in property <bool> busy-test: false;
+    in property <bool> busy-write: false;
+    in property <int> test-done: 0;
+    in property <int> test-total: 0;
+    in property <int> sort-col: 5;
+    in property <bool> sort-desc: false;
+
+    // ---- presets / theme ---------------------------------------------
+    in property <[string]> preset-names;
+    in-out property <string> preset-name;
+    in-out property <int> theme-index: 0;
+    in-out property <string> save-path;
+
+    // ---- tabs ---------------------------------------------------------
+    in-out property <int> tab: 0;
+    in property <[BackupRow]> backups;
+    in-out property <int> selected-backup: -1;
+    in property <string> diff-text;
+    in property <string> unit-text;
+    in-out property <string> timer-preset;
+
+    callback filters-changed();
+    callback country-toggled(int, bool);
+    callback countries-all(bool);
+    callback country-search-changed();
+    callback fetch();
+    callback start-test();
+    callback cancel-test();
+    callback write-system();
+    callback save-file();
+    callback row-toggled(int, bool);
+    callback sort-by(int);
+    callback preset-picked(string);
+    callback preset-save();
+    callback preset-delete();
+    callback theme-changed(int);
+    callback backups-refresh();
+    callback backup-diff(int);
+    callback backup-restore(int);
+    callback units-generate();
+    callback units-install();
+    callback units-remove();
+
+    public function apply-theme() {
+        if (root.theme-index == 1) {
+            Palette.color-scheme = ColorScheme.dark;
+        } else if (root.theme-index == 2) {
+            Palette.color-scheme = ColorScheme.light;
+        } else {
+            Palette.color-scheme = ColorScheme.unknown;
+            if (Palette.color-scheme == ColorScheme.unknown) {
+                Palette.color-scheme = ColorScheme.dark;
+            }
+        }
+    }
+
+    VerticalLayout {
+        HorizontalLayout {
+            vertical-stretch: 1;
+            // ===================== sidebar =====================
+            Rectangle {
+                width: 300px;
+                background: Palette.alternate-background;
+                ScrollView {
+                    VerticalLayout {
+                        padding: 12px;
+                        spacing: 8px;
+                        alignment: start;
+                        SectionTitle { text: "COUNTRY"; }
+                        LineEdit {
+                            placeholder-text: "Search countries…";
+                            text <=> root.country-search;
+                            edited(t) => { root.country-search-changed(); }
+                        }
+                        HorizontalLayout {
+                            spacing: 6px;
+                            Button { text: "All"; clicked => { root.countries-all(true); } }
+                            Button { text: "None"; clicked => { root.countries-all(false); } }
+                        }
+                        Rectangle {
+                            height: 170px;
+                            border-width: 1px;
+                            border-color: Palette.border;
+                            ListView {
+                                for c[i] in root.countries: HorizontalLayout {
+                                    height: 28px;
+                                    CheckBox {
+                                        text: c.name;
+                                        checked: c.checked;
+                                        toggled => { root.country-toggled(i, self.checked); }
+                                    }
+                                    Text {
+                                        text: c.count;
+                                        color: Palette.foreground;
+                                        horizontal-alignment: right;
+                                        vertical-alignment: center;
+                                        width: 36px;
+                                    }
+                                }
+                            }
+                        }
+                        SectionTitle { text: "PROTOCOL"; }
+                        HorizontalLayout {
+                            spacing: 4px;
+                            CheckBox { text: "https"; checked <=> root.p-https; toggled => { root.filters-changed(); } }
+                            CheckBox { text: "http"; checked <=> root.p-http; toggled => { root.filters-changed(); } }
+                            CheckBox { text: "rsync"; checked <=> root.p-rsync; toggled => { root.filters-changed(); } }
+                        }
+                        SectionTitle { text: "SYNC"; }
+                        HorizontalLayout {
+                            spacing: 8px;
+                            Text { text: "Max age (h, 0 = any)"; color: Palette.foreground; vertical-alignment: center; horizontal-stretch: 1; }
+                            SpinBox { value <=> root.age-hours; minimum: 0; maximum: 100000; width: 110px; edited(v) => { root.filters-changed(); } }
+                        }
+                        HorizontalLayout {
+                            spacing: 8px;
+                            Text { text: "Min completion %"; color: Palette.foreground; vertical-alignment: center; horizontal-stretch: 1; }
+                            SpinBox { value <=> root.completion; minimum: 0; maximum: 100; width: 110px; edited(v) => { root.filters-changed(); } }
+                        }
+                        SectionTitle { text: "IP VERSION"; }
+                        HorizontalLayout {
+                            spacing: 4px;
+                            CheckBox { text: "Require IPv4"; checked <=> root.ipv4; toggled => { root.filters-changed(); } }
+                            CheckBox { text: "Require IPv6"; checked <=> root.ipv6; toggled => { root.filters-changed(); } }
+                        }
+                        SectionTitle { text: "URL REGEX"; }
+                        LineEdit {
+                            placeholder-text: "include (regex)";
+                            text <=> root.include-re;
+                            edited(t) => { root.filters-changed(); }
+                        }
+                        LineEdit {
+                            placeholder-text: "exclude (regex)";
+                            text <=> root.exclude-re;
+                            edited(t) => { root.filters-changed(); }
+                        }
+                        SectionTitle { text: "SELECTION & SPEED TEST"; }
+                        HorizontalLayout {
+                            spacing: 8px;
+                            Text { text: "Top N mirrors"; color: Palette.foreground; vertical-alignment: center; horizontal-stretch: 1; }
+                            SpinBox { value <=> root.number; minimum: 1; maximum: 500; width: 110px; edited(v) => { root.filters-changed(); } }
+                        }
+                        HorizontalLayout {
+                            spacing: 8px;
+                            Text { text: "Concurrency"; color: Palette.foreground; vertical-alignment: center; horizontal-stretch: 1; }
+                            SpinBox { value <=> root.concurrency; minimum: 1; maximum: 64; width: 110px; edited(v) => { root.filters-changed(); } }
+                        }
+                        HorizontalLayout {
+                            spacing: 8px;
+                            Text { text: "Timeout (s)"; color: Palette.foreground; vertical-alignment: center; horizontal-stretch: 1; }
+                            SpinBox { value <=> root.timeout-secs; minimum: 1; maximum: 120; width: 110px; edited(v) => { root.filters-changed(); } }
+                        }
+                        SectionTitle { text: "PRESETS"; }
+                        ComboBox {
+                            model: root.preset-names;
+                            selected(v) => { root.preset-picked(v); }
+                        }
+                        LineEdit { placeholder-text: "preset name"; text <=> root.preset-name; }
+                        HorizontalLayout {
+                            spacing: 6px;
+                            Button { text: "Save"; clicked => { root.preset-save(); } }
+                            Button { text: "Delete"; clicked => { root.preset-delete(); } }
+                        }
+                        SectionTitle { text: "THEME"; }
+                        ComboBox {
+                            model: ["System", "Dark", "Light"];
+                            current-index: root.theme-index;
+                            selected(v) => { root.theme-changed(self.current-index); }
+                        }
+                    }
+                }
+            }
+            Rectangle { width: 1px; background: Palette.border; }
+
+            // ===================== main area =====================
+            VerticalLayout {
+                horizontal-stretch: 1;
+                // tab bar + actions
+                Rectangle {
+                    height: 48px;
+                    HorizontalLayout {
+                        padding: 8px;
+                        spacing: 8px;
+                        Button { text: "Mirrors"; primary: root.tab == 0; clicked => { root.tab = 0; } }
+                        Button { text: "Backups"; primary: root.tab == 1; clicked => { root.tab = 1; root.backups-refresh(); } }
+                        Button { text: "Timer"; primary: root.tab == 2; clicked => { root.tab = 2; } }
+                        Rectangle { horizontal-stretch: 1; }
+                        Button { text: root.busy-fetch ? "Fetching…" : "Fetch mirrors"; enabled: !root.busy-fetch; clicked => { root.fetch(); } }
+                        Button { text: "Speed test"; enabled: !root.busy-test && root.rows.length > 0; visible: !root.busy-test; clicked => { root.start-test(); } }
+                        Button { text: "Cancel test"; visible: root.busy-test; clicked => { root.cancel-test(); } }
+                        Button { text: "Write mirrorlist…"; primary: true; enabled: !root.busy-write && root.rows.length > 0; clicked => { root.write-system(); } }
+                    }
+                }
+                Rectangle { height: 1px; background: Palette.border; }
+
+                // ---- Mirrors tab ----
+                if root.tab == 0: VerticalLayout {
+                    vertical-stretch: 1;
+                    // header
+                    Rectangle {
+                        height: 30px;
+                        background: Palette.alternate-background;
+                        HorizontalLayout {
+                            Rectangle { width: 40px; }
+                            Header { horizontal-stretch: 1; min-width: 200px; text: "URL"; idx: 0; sort-col: root.sort-col; sort-desc: root.sort-desc; clicked => { root.sort-by(0); } }
+                            Header { width: 110px; text: "Country"; idx: 1; sort-col: root.sort-col; sort-desc: root.sort-desc; clicked => { root.sort-by(1); } }
+                            Header { width: 56px; text: "Proto"; idx: 2; sortable: false; sort-col: root.sort-col; sort-desc: root.sort-desc; }
+                            Header { width: 120px; text: "Last sync"; idx: 3; sort-col: root.sort-col; sort-desc: root.sort-desc; clicked => { root.sort-by(3); } }
+                            Header { width: 70px; text: "Delay"; idx: 4; sort-col: root.sort-col; sort-desc: root.sort-desc; clicked => { root.sort-by(4); } }
+                            Header { width: 64px; text: "Score"; idx: 5; sort-col: root.sort-col; sort-desc: root.sort-desc; clicked => { root.sort-by(5); } }
+                            Header { width: 110px; text: "Speed"; idx: 6; sort-col: root.sort-col; sort-desc: root.sort-desc; clicked => { root.sort-by(6); } }
+                            Header { width: 60px; text: "Compl."; idx: 7; sort-col: root.sort-col; sort-desc: root.sort-desc; clicked => { root.sort-by(7); } }
+                        }
+                    }
+                    if root.busy-test: ProgressIndicator {
+                        height: 4px;
+                        progress: root.test-total > 0 ? root.test-done / root.test-total : 0;
+                    }
+                    ListView {
+                        vertical-stretch: 1;
+                        for r[i] in root.rows: Rectangle {
+                            height: 28px;
+                            background: Math.mod(i, 2) == 1 ? Palette.alternate-background.with-alpha(0.4) : transparent;
+                            HorizontalLayout {
+                                Rectangle {
+                                    width: 40px;
+                                    CheckBox {
+                                        x: 6px;
+                                        checked: r.checked;
+                                        toggled => { root.row-toggled(i, self.checked); }
+                                    }
+                                }
+                                Cell { horizontal-stretch: 1; min-width: 200px; text: r.url; }
+                                Cell { width: 110px; text: r.country; }
+                                Cell { width: 56px; text: r.protocol; }
+                                Cell { width: 120px; text: r.last-sync; }
+                                Cell { width: 70px; text: r.delay; }
+                                Cell { width: 64px; text: r.score; }
+                                Rectangle {
+                                    width: 110px;
+                                    if r.state == 1: HorizontalLayout {
+                                        padding-right: 8px;
+                                        alignment: center;
+                                        Text { text: "⟳ testing"; color: Palette.accent-background; vertical-alignment: center; }
+                                    }
+                                    if r.state != 1: Cell {
+                                        text: r.speed;
+                                        color: r.state == 3 ? #d9534f : Palette.foreground;
+                                    }
+                                }
+                                Cell { width: 60px; text: r.completion; }
+                            }
+                        }
+                    }
+                }
+
+                // ---- Backups tab ----
+                if root.tab == 1: VerticalLayout {
+                    vertical-stretch: 1;
+                    padding: 8px;
+                    spacing: 8px;
+                    HorizontalLayout {
+                        spacing: 8px;
+                        Button { text: "Refresh"; clicked => { root.backups-refresh(); } }
+                        Button { text: "Diff vs current"; enabled: root.selected-backup >= 0; clicked => { root.backup-diff(root.selected-backup); } }
+                        Button { text: "Restore selected…"; enabled: root.selected-backup >= 0; clicked => { root.backup-restore(root.selected-backup); } }
+                        Text { text: "Diff shows what a restore would change (- current, + backup)."; color: Palette.foreground; vertical-alignment: center; }
+                    }
+                    Rectangle {
+                        height: 160px;
+                        border-width: 1px;
+                        border-color: Palette.border;
+                        ListView {
+                            for b[i] in root.backups: Rectangle {
+                                height: 28px;
+                                background: root.selected-backup == i ? Palette.accent-background.with-alpha(0.3) : transparent;
+                                TouchArea { clicked => { root.selected-backup = i; root.backup-diff(i); } }
+                                HorizontalLayout {
+                                    padding-left: 8px;
+                                    Text { text: b.name; color: Palette.foreground; vertical-alignment: center; horizontal-stretch: 1; }
+                                    Text { text: b.size; color: Palette.foreground; vertical-alignment: center; width: 80px; }
+                                }
+                            }
+                        }
+                    }
+                    TextEdit {
+                        vertical-stretch: 1;
+                        read-only: true;
+                        font-size: 12px;
+                        text: root.diff-text;
+                    }
+                }
+
+                // ---- Timer tab ----
+                if root.tab == 2: VerticalLayout {
+                    vertical-stretch: 1;
+                    padding: 8px;
+                    spacing: 8px;
+                    Text {
+                        wrap: word-wrap;
+                        color: Palette.foreground;
+                        text: "Generates a system service + weekly timer that runs `mirrorscope --cli --preset <name>`. The preset must be saved first. Review the unit files below; installing uses the privileged helper (polkit prompt).";
+                    }
+                    HorizontalLayout {
+                        spacing: 8px;
+                        LineEdit { placeholder-text: "preset name"; text <=> root.timer-preset; horizontal-stretch: 1; }
+                        Button { text: "Generate"; clicked => { root.units-generate(); } }
+                        Button { text: "Install & enable…"; enabled: root.unit-text != ""; clicked => { root.units-install(); } }
+                        Button { text: "Remove timer…"; clicked => { root.units-remove(); } }
+                    }
+                    TextEdit {
+                        vertical-stretch: 1;
+                        read-only: true;
+                        font-size: 12px;
+                        text: root.unit-text;
+                    }
+                }
+
+                Rectangle { height: 1px; background: Palette.border; }
+                // ---- preview ----
+                VerticalLayout {
+                    height: 230px;
+                    padding: 8px;
+                    spacing: 6px;
+                    HorizontalLayout {
+                        spacing: 8px;
+                        SectionTitle { text: "PREVIEW (exactly what will be written)"; vertical-alignment: center; horizontal-stretch: 1; }
+                        LineEdit { text <=> root.save-path; placeholder-text: "/path/to/mirrorlist"; width: 280px; }
+                        Button { text: "Save to file"; enabled: root.rows.length > 0; clicked => { root.save-file(); } }
+                    }
+                    TextEdit {
+                        vertical-stretch: 1;
+                        read-only: true;
+                        font-size: 12px;
+                        text: root.preview;
+                    }
+                }
+            }
+        }
+        // ===================== status bar =====================
+        Rectangle {
+            height: 28px;
+            background: Palette.alternate-background;
+            HorizontalLayout {
+                padding-left: 12px;
+                padding-right: 12px;
+                spacing: 16px;
+                Text { text: root.status-text; color: Palette.foreground; vertical-alignment: center; }
+                Text {
+                    text: root.message;
+                    color: root.message-error ? #d9534f : Palette.foreground;
+                    vertical-alignment: center;
+                    horizontal-stretch: 1;
+                    overflow: elide;
+                }
+            }
+        }
+    }
+}

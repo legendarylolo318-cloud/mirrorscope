@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.mirrorscope.Mirrorscope</id>
+  <name>mirrorscope</name>
+  <summary>Rank, test and write the Arch Linux pacman mirrorlist</summary>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT</project_license>
+  <description>
+    <p>mirrorscope is a native replacement for reflector with a graphical interface.
+    Filter mirrors by country, protocol, age and completion, measure real download
+    speed, preview the resulting mirrorlist and write it with a privileged helper
+    through polkit. The GUI never runs as root.</p>
+  </description>
+  <launchable type="desktop-id">mirrorscope.desktop</launchable>
+  <provides><binary>mirrorscope</binary></provides>
+  <categories><category>System</category></categories>
+  <url type="homepage">https://github.com/example/mirrorscope</url>
+  <content_rating type="oars-1.1"/>
+  <releases>
+    <release version="0.1.0" date="2026-11-12"/>
+  </releases>
+</component>

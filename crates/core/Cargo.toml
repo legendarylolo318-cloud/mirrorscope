@@ -1,0 +1,21 @@
+[package]
+name = "mirrorscope-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Fetch, filter, sort, speed-test and format Arch Linux mirrors"
+
+[dependencies]
+chrono.workspace = true
+regex.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+similar.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+toml.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
