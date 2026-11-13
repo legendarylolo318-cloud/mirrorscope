@@ -237,7 +237,7 @@ async fn pipeline(args: CliArgs, s: Settings) -> Result<()> {
 
     match &args.save {
         None => print!("{text}"),
-        Some(p) if p.as_os_str() == SYSTEM_MIRRORLIST => {
+        Some(p) if is_system_mirrorlist(p) => {
             let out =
                 tokio::task::spawn_blocking(move || privileged::run_helper(&["write"], &text))
                     .await?
@@ -246,12 +246,44 @@ async fn pipeline(args: CliArgs, s: Settings) -> Result<()> {
         }
         Some(p) => {
             let tmp = p.with_extension("mirrorscope-tmp");
-            std::fs::write(&tmp, &text).with_context(|| format!("writing {}", tmp.display()))?;
-            std::fs::rename(&tmp, p).with_context(|| format!("renaming to {}", p.display()))?;
+            let res = std::fs::write(&tmp, &text)
+                .with_context(|| format!("writing {}", tmp.display()))
+                .and_then(|_| {
+                    std::fs::rename(&tmp, p).with_context(|| format!("renaming to {}", p.display()))
+                });
+            if res.is_err() {
+                let _ = std::fs::remove_file(&tmp);
+            }
+            res?;
             eprintln!("Wrote {}", p.display());
         }
     }
     Ok(())
+}
+
+/// Whether `p` names the system mirrorlist, however it is spelled
+/// (`/etc/pacman.d//mirrorlist`, `../pacman.d/mirrorlist`, a symlinked dir, ...).
+/// Such writes must go through the helper (validation + backup).
+fn is_system_mirrorlist(p: &std::path::Path) -> bool {
+    let target = std::path::Path::new(SYSTEM_MIRRORLIST);
+    if p == target {
+        return true;
+    }
+    let (Some(parent), Some(name)) = (p.parent(), p.file_name()) else {
+        return false;
+    };
+    let parent = if parent.as_os_str().is_empty() {
+        std::path::Path::new(".")
+    } else {
+        parent
+    };
+    match (
+        std::fs::canonicalize(parent),
+        std::fs::canonicalize(mirrorscope_core::PACMAN_DIR),
+    ) {
+        (Ok(a), Ok(b)) => a == b && name == "mirrorlist",
+        _ => false,
+    }
 }
 
 async fn measure(client: &reqwest::Client, list: &[Mirror], s: &Settings) -> HashMap<String, f64> {
@@ -345,6 +377,28 @@ mod tests {
         assert_eq!(s.number, 7);
         assert_eq!(s.filter.countries, vec!["Sweden"]);
         assert!(build_settings(&parse(&["--cli", "--preset", "nope"]), &cfg).is_err());
+    }
+
+    #[test]
+    fn system_mirrorlist_detection() {
+        assert!(is_system_mirrorlist(std::path::Path::new(
+            "/etc/pacman.d/mirrorlist"
+        )));
+        if std::path::Path::new("/etc/pacman.d").is_dir() {
+            for p in [
+                "/etc/pacman.d//mirrorlist",
+                "/etc/./pacman.d/mirrorlist",
+                "/etc/pacman.d/../pacman.d/mirrorlist",
+            ] {
+                assert!(is_system_mirrorlist(std::path::Path::new(p)), "{p}");
+            }
+        }
+        assert!(!is_system_mirrorlist(std::path::Path::new(
+            "/tmp/mirrorlist"
+        )));
+        assert!(!is_system_mirrorlist(std::path::Path::new(
+            "/etc/pacman.d/mirrorlist.new"
+        )));
     }
 
     #[test]

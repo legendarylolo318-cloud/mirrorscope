@@ -115,6 +115,60 @@ mod tests {
         assert!(StatusDocument::parse("{}").is_err());
     }
 
+    const LIVE: &str = include_str!("../tests/fixtures/status-live-sample.json");
+
+    #[test]
+    fn parses_live_sample() {
+        let doc = StatusDocument::parse(LIVE).unwrap();
+        assert_eq!(doc.version, Some(3));
+        assert!(
+            doc.last_check.is_some(),
+            "fractional-second timestamps parse"
+        );
+        assert!(doc.urls.len() >= 20);
+        assert!(doc.urls.iter().any(|m| m.country == "Réunion"));
+        assert!(doc.urls.iter().any(|m| m.country == "Türkiye"));
+        for p in [Protocol::Http, Protocol::Https, Protocol::Rsync] {
+            assert!(doc.urls.iter().any(|m| m.protocol == p), "{p:?}");
+        }
+        for m in &doc.urls {
+            assert!(m.url.ends_with('/'), "{}", m.url);
+            if let Some(c) = m.completion_pct {
+                assert!((0.0..=1.0).contains(&c));
+            }
+        }
+    }
+
+    #[test]
+    fn tolerates_schema_drift() {
+        // unknown fields, missing optional fields, nulls, new protocol
+        let j = r#"{"urls":[
+            {"url":"https://a.example/","protocol":"https","new_field":[1,2]},
+            {"url":"https://b.example/","protocol":"ftp","last_sync":null,
+             "completion_pct":null,"delay":null,"score":null,"active":true,
+             "country":"","country_code":"","ipv4":true,"ipv6":false}
+        ],"some_future_key":{"x":1}}"#;
+        let doc = StatusDocument::parse(j).unwrap();
+        assert_eq!(doc.urls.len(), 2);
+        assert!(!doc.urls[0].active);
+        assert_eq!(doc.urls[1].protocol, Protocol::Other);
+        assert!(doc.last_check.is_none());
+    }
+
+    #[test]
+    fn rejects_wrong_types() {
+        for j in [
+            r#"{"urls":{}}"#,
+            r#"{"urls":[{"protocol":"https"}]}"#,
+            r#"{"urls":[{"url":"https://a/","protocol":"https","delay":"soon"}]}"#,
+            r#"{"urls":[{"url":"https://a/","protocol":"https","last_sync":"yesterday"}]}"#,
+            "",
+            "[]",
+        ] {
+            assert!(StatusDocument::parse(j).is_err(), "{j}");
+        }
+    }
+
     #[test]
     fn base_url_adds_slash() {
         let mut m = StatusDocument::parse(FIXTURE).unwrap().urls.remove(0);
